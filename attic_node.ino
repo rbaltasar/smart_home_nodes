@@ -20,6 +20,8 @@
 #include <ArduinoJson.h>
 #include "RGB_to_IR.h"
 #include <DHTesp.h>
+#include <Wire.h>
+#include <BH1750.h>
 
 /* Network settings */
 const char* ssid = "";
@@ -30,12 +32,13 @@ const char* mqtt_server = "192.168.2.118";
 #define DEBUG_ENABLED 1
 
 /* Hardware settings */
-#define TEMPERATURE_SENSOR_PIN 5
+#define TEMPERATURE_SENSOR_PIN D1
+#define DOOR_SENSOR_PIN D2
 #define DHTTYPE DHT11   // DHT 11
-#define LIGHT_SENSOR_PIN 2
-#define IR_EMITTER_PIN 3
-#define LIGHT_THRESHOLD 1
-#define MEASUREMENT_DELTA 0.1
+#define LIGHT_SENSOR_PIN_1 D6
+#define LIGHT_SENSOR_PIN_2 D7
+#define MEASUREMENT_DELTA 0.01
+
 #define DEFAULT_POLLING_PERIOD 10000 //10 seconds
 #define WARNING_POLLING_PERIOD 100000 //100 seconds
 
@@ -44,25 +47,15 @@ const char* mqtt_server = "192.168.2.118";
 
 /* Logical states */
 float light_amount = 0;
+float light_amount_old = 99999;
 float temperature_buffer[BUFFER_SIZE+1];
 float humidity_buffer[BUFFER_SIZE+1];
 float temperature = 0;
-float temperature_old = 0;
+float temperature_old = 99999;
 float humidity = 0;
-float humidity_old = 0;
+float humidity_old = 99999;
 uint8_t nan_count = 0;
 uint32_t polling_period = DEFAULT_POLLING_PERIOD;
-
-struct lamp_status
-{
-  String state;
-  bool color;
-  uint8_t R;
-  uint8_t G;
-  uint8_t B;
-};
-
-lamp_status lamp_request;
 
 /* Communication settings */
 WiFiClient espClient;
@@ -73,19 +66,17 @@ char msg[5];
 //JsonObject& JSONencoder = JSONbuffer.createObject();
 
 DHTesp temperature_sensor;
+BH1750 lightMeter;
 
 void setup() {
-  //pinMode(BUILTIN_LED, OUTPUT);     // Initialize the BUILTIN_LED pin as an output
+
   Serial.begin(115200);
 
   setup_wifi();
   setup_hardware();
   setup_mqtt();
 
-  lamp_request.state = "";
-  lamp_request.R = 0;
-  lamp_request.G = 0;
-  lamp_request.B = 0;
+  attachInterrupt(digitalPinToInterrupt(DOOR_SENSOR_PIN), door_sensor_isr, RISING);
 
   temperature_buffer[BUFFER_SIZE] = 0;
   humidity_buffer[BUFFER_SIZE] = 0;
@@ -99,7 +90,7 @@ void setup_mqtt()
   /* Define callback function */
   client.setCallback(callback);
   /* Subscribe to topics */
-  client.subscribe("attic_node/light");
+
 }
 
 /* Connect to the wireless network */
@@ -131,6 +122,10 @@ void setup_hardware()
  /* Setup pins */
  temperature_sensor.setup(TEMPERATURE_SENSOR_PIN, DHTesp::DHT11);
 
+ /* Initialize I2C bus */
+  Wire.begin(LIGHT_SENSOR_PIN_1,LIGHT_SENSOR_PIN_2);
+  lightMeter.begin();
+
 #if DEBUG_ENABLED
    Serial.println("Hardware setup");
 #endif
@@ -157,16 +152,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
   /* Parse JSON message */
 
   /* Save request in local memory */
-  #if 0
-  lamp_request.state =
-  lamp_request.color =
-  if(lamp_request.color)
-  {
-    lamp_request.R =
-    lamp_request.G =
-    lamp_request.B =
-  }
-  #endif
+
 }
 
 /* Reconnect to the MQTT broker */
@@ -203,8 +189,9 @@ void network_loop()
 /* Get the amount of light */
 void get_light_amount()
 {
-  light_amount = digitalRead(LIGHT_SENSOR_PIN);
-#if 0
+  light_amount = lightMeter.readLightLevel();
+
+#if DEBUG_ENABLED
   Serial.print("Light amount: ");
   Serial.println(light_amount);
 #endif
@@ -258,9 +245,6 @@ void get_temperature()
   float tmp_humidity = temperature_sensor.getHumidity();
   float tmp_temperature = temperature_sensor.getTemperature();
 
-  temperature_old = temperature;
-  humidity_old = humidity;
-
   temperature = process_measurement(temperature_buffer,tmp_temperature);
   humidity = process_measurement(humidity_buffer,tmp_humidity);
 
@@ -274,6 +258,11 @@ void get_temperature()
   Serial.print("Averaged humidity: ");
   Serial.println(humidity);
 #endif
+}
+
+void door_sensor_isr()
+{
+  last_iteration = 0;
 }
 
 /* Update the polling period depending on the status of the system */
@@ -302,7 +291,7 @@ void poll_sensors()
   get_temperature();
 
   /* Get the amount of light (only if request received) */
-  if(lamp_request.state == "ON_LIGHT") get_light_amount();
+  get_light_amount();
 
   /* Update polling period */
   update_polling_period();
@@ -313,39 +302,7 @@ void poll_sensors()
 /* Check if the light amount went above/below the threshold */
 void node_logic()
 {
-  /* Handle light request */
-  if(lamp_request.state == "ON_LIGHT" && (light_amount < LIGHT_THRESHOLD))
-  {
-#if DEBUG_ENABLED
-    Serial.println("Sending ON command under low light conditions");
-#endif
-    RGB_to_IR ir_sender(IR_EMITTER_PIN);
-    ir_sender.send_ir_on();
-  }
-  else if(lamp_request.state == "ON")
-  {
-#if DEBUG_ENABLED
-    Serial.println("Sending ON command");
-#endif
-    RGB_to_IR ir_sender(IR_EMITTER_PIN);
-    ir_sender.send_ir_on();
-  }
-  else if(lamp_request.state == "OFF")
-  {
-#if DEBUG_ENABLED
-    Serial.println("Sending OFF command");
-#endif
-    RGB_to_IR ir_sender(IR_EMITTER_PIN);
-    ir_sender.send_ir_off();
-  }
-  if(lamp_request.color)
-  {
-#if DEBUG_ENABLED
-    Serial.println("Sending color command");
-#endif
-    RGB_to_IR ir_sender(IR_EMITTER_PIN);
-    ir_sender.send_ir_rgb(lamp_request.R, lamp_request.G, lamp_request.B);
-  }
+
 }
 
 /* Publish sensor information */
@@ -355,20 +312,33 @@ void publish_status()
   Serial.println("Publishing messages");
 #endif
   /* Publish temperature and humidity with thanges largen than 10% */
+
   if( abs(temperature - temperature_old) > abs(MEASUREMENT_DELTA*temperature) )
   {
     #if DEBUG_ENABLED
-    Serial.println("Detected change in temperature larger than 10%. Publishing temperature");
+    Serial.println("Detected change in temperature larger than 1%. Publishing temperature");
     #endif
     client.publish("attic_node/temperature", String(temperature).c_str() );
+    temperature_old = temperature;
   }
 
   if( abs(humidity - humidity_old) > abs(MEASUREMENT_DELTA*humidity) )
   {
     #if DEBUG_ENABLED
-    Serial.println("Detected change in humidity larger than 10%. Publishing humidity");
+    Serial.println("Detected change in humidity larger than 1%. Publishing humidity");
     #endif
     client.publish("attic_node/humidity", String(humidity).c_str() );
+    humidity_old = humidity;
+  }
+
+  /* Publish light amount */
+  if( abs(light_amount - light_amount_old) > abs(MEASUREMENT_DELTA*light_amount) )
+  {
+    #if DEBUG_ENABLED
+    Serial.println("Detected change in light amount larger than 1%. Publishing light amount");
+    #endif
+    client.publish("attic_node/light", String(light_amount).c_str() );
+    light_amount_old = light_amount;
   }
 
 }
@@ -381,6 +351,10 @@ void loop() {
   long now = millis();
   if( (now - last_iteration) > polling_period )
   {
+
+    /* Enter critical area */
+
+    /* Update last iteration time */
     last_iteration = now;
 
     /* Sensor polling */
@@ -391,5 +365,8 @@ void loop() {
 
     /* Publish sensor information */
     publish_status();
+
+    /* Leave critical area */
+
   }
 }

@@ -29,11 +29,11 @@ const char* password = "";
 const char* mqtt_server = "192.168.2.118";
 
 /* Hardware settings */
-#define DOOR_STATUS_PIN D4
-#define PRESENCE_SENSOR_PIN D1
+#define DOOR_STATUS_PIN D1
+#define PRESSURE_SENSOR_PIN D2
 #define BUZZER_PIN D8
 #define PRESENCE_COUNTER_MAX 10
-#define PRESENCE_THRESHOLD 1000 //milliseconds
+#define ENTRANCE_DETECTION_THRESHOLD 10000 //milliseconds
 #define ALARM_DURATION 1 //repetitions
 #define POLLING_PERIOD 3000 //milliseconds
 
@@ -44,7 +44,7 @@ bool door_status_open = false;
 bool door_status_open_old = false;
 bool warning_status = false;
 bool entrance_detected = false;
-unsigned long last_presence_detected = 0;
+unsigned long presssure_detection_time = 0;
 
 /* Communication settings */
 WiFiClient espClient;
@@ -62,10 +62,7 @@ void setup() {
   setup_hardware();
   setup_mqtt();
 
-
-
-  //JSONencoder["door_open"] = 0;
-  //JSONencoder["entrance_detected"] = 0;
+  attachInterrupt(digitalPinToInterrupt(PRESSURE_SENSOR_PIN), pressure_detection_isr, RISING);
 }
 
 /* Subscribe to the MQTT topics */
@@ -105,9 +102,9 @@ void setup_wifi() {
 void setup_hardware()
 {
  /* Setup pins */
- pinMode(DOOR_STATUS_PIN, INPUT);
+ pinMode(DOOR_STATUS_PIN, INPUT_PULLUP);
  pinMode(BUZZER_PIN, OUTPUT);
- pinMode(PRESENCE_SENSOR_PIN, INPUT);
+ pinMode(PRESSURE_SENSOR_PIN, INPUT_PULLUP);
 
 }
 
@@ -170,22 +167,34 @@ void get_door_status()
   if(polled_value) door_status_open = true;
   else door_status_open = false;
 
+  #if DEBUG_ENABLED
+  Serial.print("Polled value: ");
+  Serial.println(polled_value);
+  #endif
+
 }
 
 /* Get the status of the presence sensor and update presence counter */
-void get_presence_status()
+void get_pressure_status()
 {
 
-  int polled_value = digitalRead(PRESENCE_SENSOR_PIN);
+  int polled_value = digitalRead(PRESSURE_SENSOR_PIN);
 
   if(polled_value)
   {
-    last_presence_detected = millis();
+    presssure_detection_time = millis();
     #if DEBUG_ENABLED
     Serial.println("Presence detected");
     #endif
   }
+}
 
+void pressure_detection_isr()
+{
+  presssure_detection_time = millis();
+  #if DEBUG_ENABLED
+  Serial.println("Presence detected");
+  #endif
 }
 
 /* Poll all the sensors and store their value in local variables */
@@ -195,7 +204,7 @@ void poll_sensors()
   get_door_status();
 
   /* Get the status of the presence detector */
-  get_presence_status();
+  //get_presence_status();
 }
 
 /* Make sound with the BUZZER_PIN */
@@ -240,12 +249,12 @@ void node_logic()
   if(door_status_open && !door_status_open_old) //Only with status update
   {
 
-    unsigned long time_since_presence = millis() - last_presence_detected();
+    unsigned long time_since_pressure = millis() - presssure_detection_time;
     #if DEBUG_ENABLED
-    Serial.print("Time since last presence detection (seconds): ");
-    Serial.println(time_since_presence / 1000);
+    Serial.print("Time since last pressure detection (seconds): ");
+    Serial.println(time_since_pressure / 1000);
     #endif
-    if(time_since_presence > PRESENCE_THRESHOLD)
+    if(time_since_pressure > ENTRANCE_DETECTION_THRESHOLD)
     {
       entrance_detected = true;
       #if DEBUG_ENABLED
@@ -273,7 +282,7 @@ void publish_status()
   }
 
   /* Publish entrance information when detected */
-  if(entrance_detected) client.publish("entrance_node/entrance_detection", String(entrance_detected).c_str());
+  //if(entrance_detected) client.publish("entrance_node/entrance_detected", String(entrance_detected).c_str());
 
 }
 
@@ -285,6 +294,9 @@ void loop() {
   long now = millis();
   if( (now - last_iteration) > POLLING_PERIOD )
   {
+    /* Enter critical area */
+
+    /* Update last iteration time */
     last_iteration = now;
 
     /* Sensor polling */
@@ -295,6 +307,8 @@ void loop() {
 
     /* Publish sensor information */
     publish_status();
+
+    /* Leave critical area */
   }
 
 }

@@ -39,13 +39,15 @@ const char* mqtt_server = "192.168.2.118";
 #define LIGHT_SENSOR_PIN_2 D7
 #define MEASUREMENT_DELTA 0.01
 
-#define DEFAULT_POLLING_PERIOD 10000 //10 seconds
-#define WARNING_POLLING_PERIOD 100000 //100 seconds
+#define DEFAULT_POLLING_PERIOD 20000 //10 seconds
+#define WARNING_POLLING_PERIOD 20000 //100 seconds
 
 /* Data collection settings */
 #define BUFFER_SIZE 50
 
 /* Logical states */
+bool door_status_open = false;
+bool door_status_open_old = false;
 float light_amount = 0;
 float light_amount_old = 99999;
 float temperature_buffer[BUFFER_SIZE+1];
@@ -88,7 +90,7 @@ void setup_mqtt()
   /* Define MQTT broker */
   client.setServer(mqtt_server, 1883);
   /* Define callback function */
-  client.setCallback(callback);
+  //client.setCallback(callback);
   /* Subscribe to topics */
 
 }
@@ -122,6 +124,9 @@ void setup_hardware()
  /* Setup pins */
  temperature_sensor.setup(TEMPERATURE_SENSOR_PIN, DHTesp::DHT11);
 
+
+ pinMode(DOOR_SENSOR_PIN, INPUT_PULLUP);
+
  /* Initialize I2C bus */
   Wire.begin(LIGHT_SENSOR_PIN_1,LIGHT_SENSOR_PIN_2);
   lightMeter.begin();
@@ -129,30 +134,6 @@ void setup_hardware()
 #if DEBUG_ENABLED
    Serial.println("Hardware setup");
 #endif
-}
-
-/* Configure the callback function for a subscribed topic */
-void callback(char* topic, byte* payload, unsigned int length) {
-
-  /* Print message (debugging only) */
-#if DEBUG_ENABLED
-  Serial.print("Message arrived [");
-  Serial.print(topic);
-  Serial.print("] ");
-  for (int i = 0; i < length; i++) {
-    Serial.print((char)payload[i]);
-  }
-  Serial.println();
-#endif
-
-  /* Filter for topics (optional when >1 topics) */
-
-  /* Read topic info */
-
-  /* Parse JSON message */
-
-  /* Save request in local memory */
-
 }
 
 /* Reconnect to the MQTT broker */
@@ -166,7 +147,7 @@ void reconnect() {
       // Once connected, publish an announcement...
       //client.publish("outTopic", "hello world");
       // ... and resubscribe
-      client.subscribe("attic_node/light");
+      //client.subscribe("attic_node/light");
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -263,6 +244,9 @@ void get_temperature()
 void door_sensor_isr()
 {
   last_iteration = 0;
+  #if DEBUG_ENABLED
+  Serial.println("Door detected via interrupt");
+  #endif
 }
 
 /* Update the polling period depending on the status of the system */
@@ -295,6 +279,28 @@ void poll_sensors()
 
   /* Update polling period */
   update_polling_period();
+
+  /* Get door status */
+  get_door_status();
+}
+
+/* Get the status of the door */
+void get_door_status()
+{
+  /* Poll actual sensor */
+  int polled_value = digitalRead(DOOR_SENSOR_PIN);
+
+  /* Save old status for change detection */
+  door_status_open_old = door_status_open;
+
+  if(polled_value) door_status_open = true;
+  else door_status_open = false;
+
+  #if DEBUG_ENABLED
+  Serial.print("Polled value: ");
+  Serial.println(polled_value);
+  #endif
+
 }
 
 /* Node-specific logic */
@@ -339,6 +345,16 @@ void publish_status()
     #endif
     client.publish("attic_node/light", String(light_amount).c_str() );
     light_amount_old = light_amount;
+  }
+
+  /* Publish door open information with status update */
+  if(door_status_open != door_status_open_old)
+  {
+#if DEBUG_ENABLED
+    Serial.print("Change in door status: ");
+    Serial.println(door_status_open);
+#endif
+    client.publish("attic_node/door_status", String(door_status_open).c_str());
   }
 
 }

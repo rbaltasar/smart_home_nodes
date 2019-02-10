@@ -29,39 +29,40 @@ const char* password = "";
 const char* mqtt_server = "192.168.2.118";
 
 /* Debugging */
-#define DEBUG_ENABLED 1
+#define DEBUG_ENABLED 0
 
 /* Hardware settings */
 #define DOOR_STATUS_PIN D2
 #define PRESSURE_SENSOR_PIN D1
 #define BUZZER_PIN D8
 #define PRESENCE_COUNTER_MAX 10
-#define ENTRANCE_DETECTION_THRESHOLD 10000 //milliseconds
+#define ENTRANCE_DETECTION_THRESHOLD 20000 //milliseconds
+#define EVENT_MAX_TX_FREQ 10000 //milliseconds
 #define ALARM_DURATION 1 //repetitions
 #define POLLING_PERIOD 3000 //milliseconds
 
 
 /* Logical states */
-bool door_status_open = false;
+volatile bool door_status_open = false;
 bool door_status_open_old = false;
-bool pressure_detected = false;
+volatile bool pressure_detected = false;
 bool pressure_detected_old = false;
 bool warning_status = false;
-unsigned long last_pressure_detected = 99999;
-unsigned long last_door_detected = 0;
+unsigned long last_pressure_detected = 0;
+unsigned long last_event_published = 0;
 bool entrance_detected = false;
 bool exit_detected = false;
 
 /* Communication settings */
 WiFiClient espClient;
 PubSubClient client(espClient);
-long last_iteration = 0;
+volatile unsigned long last_iteration = 0;
 char msg[5];
 //StaticJsonBuffer<200> jsonBuffer;
 //JsonObject& JSONencoder = JSONbuffer.createObject();
 
 void setup() {
-  pinMode(BUILTIN_LED, OUTPUT);     // Initialize the BUILTIN_LED pin as an output
+
   Serial.begin(115200);
 
   setup_wifi();
@@ -187,30 +188,46 @@ void get_door_status()
 /* Get the status of the presence sensor and update presence counter */
 void get_pressure_status()
 {
-  /* Poll sensor */
-  int polled_value = digitalRead(PRESSURE_SENSOR_PIN);
-
   /* Save old status for change detection */
   pressure_detected_old = pressure_detected;
 
-  if(polled_value)
+
+  /* Debounce sensor */
+  int polled_value;
+  uint8_t detection_count = 0;
+
+  polled_value = digitalRead(PRESSURE_SENSOR_PIN);
+  delay(50);
+  if(!polled_value) detection_count++;
+  polled_value = digitalRead(PRESSURE_SENSOR_PIN);
+  delay(100);
+  if(!polled_value) detection_count++;
+  polled_value = digitalRead(PRESSURE_SENSOR_PIN);
+  delay(50);
+  if(!polled_value) detection_count++;
+  polled_value = digitalRead(PRESSURE_SENSOR_PIN);
+  delay(100);
+  if(!polled_value) detection_count++;
+
+
+  if(detection_count == 4)
   {
     pressure_detected = true;
+    last_pressure_detected = millis();
   }
   else pressure_detected = false;
 
   #if DEBUG_ENABLED
   Serial.print("Presence detection: ");
-  Serial.println(polled_value);
+  Serial.println(pressure_detected);
   #endif
 }
 
 void pressure_detection_isr()
 {
   last_iteration = 0;
-  last_pressure_detected = millis();
   #if DEBUG_ENABLED
-  Serial.println("Presence detected via interrupt");
+  Serial.println("Pressure detected via interrupt");
   #endif
 }
 
@@ -311,9 +328,39 @@ void publish_status()
     client.publish("entrance_node/door_status", String(door_status_open).c_str());
   }
 
+  /* Publish door open information with status update */
+  if(pressure_detected != pressure_detected_old)
+  {
+#if DEBUG_ENABLED
+    Serial.print("Change in pressure_detected: ");
+    Serial.println(pressure_detected);
+#endif
+    client.publish("entrance_node/pressure_detected", String(pressure_detected).c_str());
+  }
+
+
+
   /* Publish entrance & exit information when detected */
-  if(entrance_detected) client.publish("entrance_node/entrance_detected", String(entrance_detected).c_str());
-  if(exit_detected) client.publish("entrance_node/exit_detected", String(exit_detected).c_str());
+  unsigned long time_since_event = millis() - last_event_published;
+  if(entrance_detected && (time_since_event > EVENT_MAX_TX_FREQ))
+  {
+    #if DEBUG_ENABLED
+    Serial.println("Publishing event: entrance detected");
+    #endif
+    client.publish("entrance_node/entrance_detected", String(entrance_detected).c_str());
+    last_event_published = millis();
+  }
+
+  time_since_event = millis() - last_event_published;
+  if(exit_detected && (time_since_event > EVENT_MAX_TX_FREQ))
+  {
+    #if DEBUG_ENABLED
+    Serial.println("Publishing event: exit detected");
+    #endif
+    client.publish("entrance_node/exit_detected", String(exit_detected).c_str());
+    /* After an exit event, sleep 3 seconds to prevent false entrance events */
+    last_event_published = millis();
+  }
 
   /* Delete entrance & exit states after publish */
   entrance_detected = false;
@@ -330,6 +377,10 @@ void loop() {
   if( (now - last_iteration) > POLLING_PERIOD )
   {
     /* Enter critical area */
+    noInterrupts();
+    #if DEBUG_ENABLED
+    Serial.println("Heartbeat: LOOP");
+    #endif
 
     /* Update last iteration time */
     last_iteration = now;
@@ -344,6 +395,7 @@ void loop() {
     publish_status();
 
     /* Leave critical area */
+    interrupts();
   }
 
 }

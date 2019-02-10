@@ -18,7 +18,6 @@
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
-#include "RGB_to_IR.h"
 #include <DHTesp.h>
 #include <Wire.h>
 #include <BH1750.h>

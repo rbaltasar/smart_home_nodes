@@ -38,6 +38,7 @@ const char* mqtt_server = "192.168.2.118";
 
 /* Sinric settings */
 #define API_KEY "" // TODO: Change to your sinric API Key. Your API Key is displayed on sinric.com dashboard
+#define DEVICE_ID ""
 #define SERVER_URL "iot.sinric.com"
 #define SERVER_PORT 80
 #define HEARTBEAT_INTERVAL 300000 // 5 Minutes
@@ -107,6 +108,8 @@ WebSocketsClient webSocket;
 DHTesp temperature_sensor;
 BH1750 lightMeter;
 
+RGB_to_IR ir_sender(IR_EMITTER_PIN);
+
 void setup() {
   //pinMode(BUILTIN_LED, OUTPUT);     // Initialize the BUILTIN_LED pin as an output
   Serial.begin(115200);
@@ -123,6 +126,10 @@ void setup() {
 
   temperature_buffer[BUFFER_SIZE] = 0;
   humidity_buffer[BUFFER_SIZE] = 0;
+
+  HardwareSerial* hwPrint;
+  hwPrint = &Serial;
+  ir_sender.configure(hwPrint);
 }
 
 /* Subscribe to the MQTT topics */
@@ -417,10 +424,6 @@ void poll_sensors()
 void node_logic()
 {
 
-  HardwareSerial* hwPrint;
-  hwPrint = &Serial;
-  RGB_to_IR ir_sender(hwPrint, IR_EMITTER_PIN);
-
   if(lamp_request.command)
   {
     Serial.println("Difference in request state!");
@@ -510,6 +513,8 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
         String deviceId = json ["deviceId"];
         String action = json ["action"];
 
+        if(deviceId != DEVICE_ID) return;
+
         if(action == "setPowerState") {
             String value = json ["value"];
             lamp_request.command = true;
@@ -528,13 +533,16 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
 
         }
         else if(action == "SetColor") {
-          float hue, saturation, brightness;
+          double hue, saturation, brightness;
           hue = json ["value"]["hue"];
           saturation = json ["value"]["saturation"];
           brightness = json ["value"]["brightness"];
-          if(hue > 180) lamp_request.B = 255;
-          else if(hue > 60) lamp_request.G = 255;
-          else lamp_request.R = 255;
+
+          ir_sender.HSV_to_RGB(hue,saturation,brightness,lamp_request.R,lamp_request.G,lamp_request.B);
+
+          //if(hue > 180) lamp_request.B = 255;
+          //else if(hue > 60) lamp_request.G = 255;
+          //else lamp_request.R = 255;
           lamp_request.color = true;
         }
         else if(action == "IncreaseColorTemperature") {

@@ -10,7 +10,7 @@
 #include <IRsend.h>
 #include <IRutils.h>
 
-#define NUM_IR_REPETITIONS 10
+#define NUM_IR_REPETITIONS 1
 #define SEND_PERIOD 100 //milliseconds
 
 #define NUM_IR_COLORS 15

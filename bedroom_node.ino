@@ -23,6 +23,8 @@
 #include <StreamString.h>
 #include "RGB_to_IR.h"
 #include <DHTesp.h>
+#include "serialFreqDisplay.h"
+#include "frequency_utilities.h"
 
 /* Network settings */
 const char* ssid = "";
@@ -62,6 +64,10 @@ float humidity = 0;
 float humidity_old = 99999;
 uint8_t nan_count = 0;
 uint32_t polling_period = DEFAULT_POLLING_PERIOD;
+unsigned long last_clap = 0;
+uint8_t clap_number = 0;
+unsigned long time_since_clap = 0;
+bool doubleclap_detected = false;
 
 /* Web server states --- Sinric */
 uint64_t heartbeatTimestamp = 0;
@@ -94,6 +100,9 @@ WebSocketsClient webSocket;
 DHTesp temperature_sensor;
 RGB_to_IR ir_sender(IR_EMITTER_PIN);
 
+//SerialFreqDisplay displ(THRESHOLD, NSAMPLES/2);
+FrequencyUtilities FreqUtilities;
+
 void setup() {
 
   pinMode(BUILTIN_LED, OUTPUT);     // Initialize the BUILTIN_LED pin as an output
@@ -115,6 +124,8 @@ void setup() {
   HardwareSerial* hwPrint;
   hwPrint = &Serial;
   ir_sender.configure(hwPrint);
+
+  FreqUtilities.begin(hwPrint);
 }
 
 /* Subscribe to the MQTT topics */
@@ -384,6 +395,14 @@ void poll_sensors()
 void node_logic()
 {
 
+  if(doubleclap_detected)
+  {
+    lamp_request.command = true;
+    if(lamp_request.state) lamp_request.state = false;
+    else lamp_request.state = true;
+    doubleclap_detected = false;
+  }
+
   if(lamp_request.command)
   {
     Serial.println("Difference in request state!");
@@ -510,10 +529,68 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
   }
 }
 
+void clap_detection_sm()
+{
+  bool clap = FreqUtilities.detect_single_clap();
+  time_since_clap = millis() - last_clap;
+
+  if(clap)
+  {
+
+
+    Serial.print("Time since last clap: ");
+    Serial.println(time_since_clap);
+
+    if( (time_since_clap > 1000) )
+    {
+      //First clap detected!
+      clap_number = 1;
+      Serial.println("First clap detected");
+    }
+
+    //A clap happened "recently"
+    else
+    {
+      if(clap_number == 1)
+      {
+        if( (time_since_clap > 100) && (time_since_clap < 400) )
+        {
+          clap_number = 2;
+          Serial.println("Second clap detected");
+        }
+        //else clap_number = 0;
+      }
+      else if(clap_number > 1)
+      {
+        if( (time_since_clap > 100) && (time_since_clap < 400) )
+        {
+          clap_number++;
+          Serial.println("Further claps detected");
+        }
+      }
+    }
+    last_clap = millis();
+  }
+
+  else
+  {
+    if( (clap_number == 2) && (time_since_clap > 400) )
+    {
+      Serial.println("Order detected!!");
+      clap_number = 0;
+      doubleclap_detected = true;
+      last_iteration = 0;
+    }
+  }
+}
+
 void loop() {
 
   /* Connection handling */
   network_loop();
+
+  /* Clap detection state machine */
+  clap_detection_sm();
 
   long now = millis();
   if( (now - last_iteration) > polling_period )

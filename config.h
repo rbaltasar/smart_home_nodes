@@ -27,9 +27,9 @@
 #define BACKGROUND_MODE_1 10
 
 //FFT configuration
-#define NSAMPLES 128
+#define NSAMPLES 64
 #define THRESHOLD 1000
-#define SAMPLING_FREQUENCY 100000 //In microseconds. 0 => BW=4,5Kh / 50 => BW=3Khz / 100 => BW=2,4Khz
+#define SAMPLING_FREQUENCY 200000
 
 //---------- Debugging ------------------
 //#define DEBUG_TRACES_TIME

@@ -37,9 +37,6 @@ void FrequencyUtilities::take_samples()
     while (micros() < (newTime + sampling_period_us)) { /* do nothing to wait */ }
   }
 
-  //max_level_actual = maxVal - minVal;
-  //max_level_actual = 20 * log(max_level_actual * 0.0049);
-
   max_level_actual = maxVal; 
 
   #ifdef DEBUG_TRACES_TIME
@@ -92,7 +89,7 @@ void FrequencyUtilities::get_freq_info()
 bool FrequencyUtilities::clap_detected()
 {
   //Check if sound above threshold detected
-  if(max_level_actual > 650)
+  if(max_level_actual > 800)
   {  
     //Check if the sound max frequency  is in the frequency of the clap
     if( (dominant_frequency > NSAMPLES/6) && (dominant_frequency < (5*NSAMPLES)/6))
@@ -109,8 +106,11 @@ bool FrequencyUtilities::detect_single_clap()
 {
   //Sample input signal
   take_samples();
+  yield();
   time_to_freq();
+  yield();
   get_freq_info();
+  yield();
 
   return clap_detected();
 }

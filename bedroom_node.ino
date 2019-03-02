@@ -2,7 +2,7 @@
   Home automation - bedroom node
 
   Data gathering:
-    Temperature & humidity 
+    Temperature & humidity
 
   Data publishing:
     Temperature & humidity
@@ -49,7 +49,7 @@ const char* mqtt_server = "192.168.2.118";
 #define HEARTBEAT_INTERVAL 300000 // 5 Minutes
 
 /* Debugging */
-#define DEBUG_ENABLED 0
+#define DEBUG_ENABLED 1
 #if DEBUG_ENABLED
 #include "serialFreqDisplay.h" //Only for frequency debugging
 #endif
@@ -59,15 +59,11 @@ const char* mqtt_server = "192.168.2.118";
 #define IR_EMITTER_PIN D2
 #define MEASUREMENT_DELTA 0.01 //Minimum change in measurements (%) to publish the data
 
-#define DEFAULT_POLLING_PERIOD 3000 //10 seconds
-#define WARNING_POLLING_PERIOD 3000 //Currently not used
-
-/* Data collection settings */
-#define BUFFER_SIZE 50 //This is the size of the signal smoothing filters
-
 /* Ensure a minimum publish rate */
 #define MINIMUM_PUBLISH_RATE 600000 //Publish each topic at least every 10 minutes
 #define NUM_PUBLISH_TOPICS 2
+#define DEFAULT_POLLING_PERIOD 20000 //10 seconds
+#define WARNING_POLLING_PERIOD 20000 //Currently not used
 
 /* Logical states */
 /* Signal smoothing filters */
@@ -76,6 +72,7 @@ const char* mqtt_server = "192.168.2.118";
  * For simplicity, the last position of the buffer contains always the index
  * of the oldest element in the buffer.
  */
+ #define BUFFER_SIZE 20
 float temperature_buffer[BUFFER_SIZE+1];
 float humidity_buffer[BUFFER_SIZE+1];
 
@@ -129,7 +126,7 @@ PubSubClient client(espClient);
 WebSocketsClient webSocket;
 DynamicJsonBuffer jsonBuffer(50);
 
-/* Temperature and humidity sensor sensor */
+/* Temperature and humidity sensor */
 DHTesp temperature_sensor;
 
 /* IR utilities */
@@ -145,9 +142,10 @@ FrequencyUtilities FreqUtilities;
 
 /* Setup */
 void setup() {
-  
-  pinMode(BUILTIN_LED, OUTPUT);     // Initialize the BUILTIN_LED pin as an output
+
+#if DEBUG_ENABLED
   Serial.begin(115200);
+#endif
 
   setup_wifi();
   setup_sinric();
@@ -162,15 +160,26 @@ void setup() {
   last_publish[0] = 0; //Temperature
   last_publish[1] = 0; //Humidity
 
-  //Ensure that the circular buffer starts at the index 0
+  /* Ensure that the circular buffer starts at the index 0 */
   temperature_buffer[BUFFER_SIZE] = 0;
   humidity_buffer[BUFFER_SIZE] = 0;
 
-  //Share the serial printer object for debugging functionalities
+  /* Share the serial printer object for debugging functionalities */
   HardwareSerial* hwPrint;
   hwPrint = &Serial;
   ir_sender.configure(hwPrint);
   FreqUtilities.begin(hwPrint);
+
+  /* Publish a boot event for error tracking and debugging */
+  bool publish_succeeded = false;
+  while(!publish_succeeded)
+  {
+    publish_succeeded = client.publish("bedroom_node/boot", "");
+    if(!publish_succeeded) network_loop();
+    yield();
+  }
+
+  blink_led(50);
 }
 
 /* Subscribe to the MQTT topics */
@@ -195,6 +204,7 @@ void setup_wifi() {
   Serial.print("Connecting to ");
   Serial.println(ssid);
 
+  WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
 
   while (WiFi.status() != WL_CONNECTED) {
@@ -233,10 +243,10 @@ void setup_sinric()
 /* Configure the hardware */
 void setup_hardware()
 {
-
-  pinMode(LED_BUILTIN, OUTPUT);
+  /* Built in LED */
+  pinMode(LED_BUILTIN, OUTPUT);     // Initialize the BUILTIN_LED pin as an output
   digitalWrite(LED_BUILTIN, HIGH); //This means led OFF
-  
+
  /* Setup pins */
  temperature_sensor.setup(TEMPERATURE_SENSOR_PIN, DHTesp::DHT22);
 
@@ -267,9 +277,9 @@ void callback(char* topic, byte* payload, unsigned int length) {
   {
     int rcv = root["req"];
     if(rcv) lamp_request.state = true;
-    else lamp_request.state = false; 
+    else lamp_request.state = false;
     lamp_request.command = true;
-    Serial.println(rcv); 
+    Serial.println(rcv);
   }
   else if(strcmp(topic,"bedroom_node/light_intensity") == 0)
   {
@@ -284,18 +294,19 @@ void callback(char* topic, byte* payload, unsigned int length) {
     lamp_request.G = root["g"];
     lamp_request.B = root["b"];
     lamp_request.color = true;
-   
-    // Output to serial monitor   
+
+    // Output to serial monitor
 #if DEBUG_ENABLED
     Serial.println(lamp_request.R);
     Serial.println(lamp_request.G);
     Serial.println(lamp_request.B);
 #endif
   }
+  last_iteration = 0;
 }
 
 /* Reconnect to the MQTT broker */
-void reconnect() 
+void reconnect()
 {
   // Loop until we're reconnected
   while (!client.connected())
@@ -309,8 +320,8 @@ void reconnect()
       client.subscribe("bedroom_node/light_state");
       client.subscribe("bedroom_node/light_intensity");
       client.subscribe("bedroom_node/light_color");
-    } 
-    else 
+    }
+    else
     {
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -324,7 +335,9 @@ void reconnect()
 /* Handle the network part of the loop */
 void network_loop()
 {
+#if DEBUG_ENABLED
   unsigned long current_time = millis();
+#endif
 
   /* MQTT loop */
   if (!client.connected()) reconnect();
@@ -336,7 +349,6 @@ void network_loop()
   if(isConnected)
   {
     uint64_t now = millis();
-
     // Send heartbeat in order to avoid disconnections during ISP resetting IPs over night. Thanks @MacSass
     if((now - heartbeatTimestamp) > HEARTBEAT_INTERVAL)
     {
@@ -344,12 +356,37 @@ void network_loop()
       webSocket.sendTXT("H");
     }
   }
-  current_time = millis() - current_time;
 
-#if DEBUG_ENABLED
+#if 0
+  current_time = millis() - current_time;
   Serial.print("Duration network_loop: ");
   Serial.println(current_time);
- #endif
+#endif
+}
+
+void blink_led(uint16_t delay_ms)
+{
+  digitalWrite(LED_BUILTIN, LOW);
+  delay(delay_ms);
+  network_loop();
+  digitalWrite(LED_BUILTIN, HIGH);
+  delay(delay_ms);
+  network_loop();
+  digitalWrite(LED_BUILTIN, LOW);
+  delay(delay_ms);
+  network_loop();
+  digitalWrite(LED_BUILTIN, HIGH);
+  delay(delay_ms);
+  network_loop();
+  digitalWrite(LED_BUILTIN, LOW);
+  delay(delay_ms);
+  digitalWrite(LED_BUILTIN, HIGH);
+  delay(delay_ms);
+  network_loop();
+  digitalWrite(LED_BUILTIN, LOW);
+  delay(delay_ms);
+  network_loop();
+  digitalWrite(LED_BUILTIN, HIGH);
 }
 
 /* Average an array. Remove oldest element. Add newest element. Filter out NaN values */
@@ -397,11 +434,11 @@ float smoothing_filter(float* measurement_buffer, float measurement)
 /* Get temperature and humidity */
 void get_temperature()
 {
-  //Instant measurement
+  /* Instant measurement */
   float tmp_humidity = temperature_sensor.getHumidity();
   float tmp_temperature = temperature_sensor.getTemperature();
 
-  //Filter and average
+  /* Filter and average */
   temperature = smoothing_filter(temperature_buffer,tmp_temperature);
   humidity = smoothing_filter(humidity_buffer,tmp_humidity);
 
@@ -445,18 +482,16 @@ void poll_sensors()
   get_temperature();
 
   /* Update polling period */
-  update_polling_period();
+  //update_polling_period();
 }
 
 /* Node-specific logic */
-/* Send light commands via IR */
-/* Check if the light amount went above/below the threshold */
 void node_logic()
 {
   /* Process double clap detected */
   if(doubleclap_detected)
   {
-    lamp_request.command = true;   
+    lamp_request.command = true;
     if(lamp_request.state) lamp_request.state = false;
     else lamp_request.state = true;
     doubleclap_detected = false;
@@ -464,10 +499,10 @@ void node_logic()
 
   /* Process lamp state change request */
   if(lamp_request.command && (lamp_request.state != lamp_request_old.state))
-  {   
+  {
     if(lamp_request.state) ir_sender.send_ir_on();
     else ir_sender.send_ir_off();
-    
+
     lamp_request_old.state = lamp_request.state;
     lamp_request.command = false;
     publish_lamp_feedback = true;
@@ -541,14 +576,22 @@ void publish_status()
   /* Publish feedback of lamp state change */
   if(publish_lamp_feedback)
   {
-    client.publish("bedroom_node/lamp_feedback", String(lamp_request_old.state).c_str() );
+    /* Ensure that the critical topics get published */
+    bool publish_succeeded = false;
+    while(!publish_succeeded)
+    {
+      publish_succeeded = client.publish("bedroom_node/lamp_feedback", String(lamp_request_old.state).c_str() );
+      if(!publish_succeeded) network_loop();
+      yield();
+    }
     publish_lamp_feedback = false;
   }
 }
 
 /* Handle WebSocket event */
 void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
-  switch(type) {
+  switch(type)
+  {
     case WStype_DISCONNECTED:
     {
       isConnected = false;
@@ -562,7 +605,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
       Serial.printf("[webSocketEvent] Waiting for commands from server ...\n");
       break;
     }
-    case WStype_TEXT: 
+    case WStype_TEXT:
     {
       Serial.printf("[webSocketEvent] get text: %s\n", payload);
       DynamicJsonBuffer jsonBuffer;
@@ -573,19 +616,19 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
       //Filter events not addressed to this device
       if(deviceId != DEVICE_ID) return;
 
-      if(action == "setPowerState") 
+      if(action == "setPowerState")
       {
         String value = json ["value"];
         lamp_request.command = true;
         if(value == "ON") lamp_request.state = true;
         else lamp_request.state = false;
       }
-      else if(action == "AdjustBrightness") 
+      else if(action == "AdjustBrightness")
       {
         int16_t brightness = (int16_t)json["value"];
         lamp_request.brightness = brightness;
       }
-      else if(action == "SetBrightness") 
+      else if(action == "SetBrightness")
       {
         //This event is not handled due to IR restrictions (we can't set a specific value)
       }
@@ -597,10 +640,10 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
         brightness = json ["value"]["brightness"];
 
         //Translate HSV to RGB
-        ir_sender.HSV_to_RGB(hue,saturation,brightness,lamp_request.R,lamp_request.G,lamp_request.B);          
+        ir_sender.HSV_to_RGB(hue,saturation,brightness,lamp_request.R,lamp_request.G,lamp_request.B);
         lamp_request.color = true;
       }
-      else if(action == "IncreaseColorTemperature") 
+      else if(action == "IncreaseColorTemperature")
       {
         //This event is not handled
       }
@@ -608,15 +651,15 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
       {
         //This event is not handled
       }
-      else if(action == "SetColorTemperature") 
-      {       
-        //This request is equivalent to set to White  
+      else if(action == "SetColorTemperature")
+      {
+        //This request is equivalent to set to White
         lamp_request.R = 255;
         lamp_request.G = 255;
         lamp_request.B = 255;
         lamp_request.color = true;
       }
-    
+
       break;
     }
     case WStype_BIN:
@@ -625,6 +668,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
       break;
     }
   }
+  last_iteration = 0;
 }
 
 /* State machine to handle the clap detection asynchronously */
@@ -632,7 +676,7 @@ void clap_detection_sm()
 {
   unsigned long current_time = millis();
   //Time since last clap detected
-  time_since_clap = millis() - last_clap;
+  time_since_clap = current_time - last_clap;
 
   //Detection of a clap in the current iteration
   //This includes signal sampling, FFT and spectrum analysis
@@ -684,7 +728,7 @@ void clap_detection_sm()
       }
     }
     //Save the timestamp of the clap
-    last_clap = millis();   
+    last_clap = millis();
   }
 
   /* No clap detected */
@@ -705,21 +749,23 @@ void clap_detection_sm()
 
   current_time = millis() - current_time;
 
-#if DEBUG_ENABLED
+#if 0
   Serial.print("Duration clap detection SM: ");
   Serial.println(current_time);
 #endif
 }
 
 /* Loop with node-specific stuff */
-/* This shall include polling the sensors, doing any node-specifi logic and 
+/* This shall include polling the sensors, doing any node-specifi logic and
  * publish the data.
  */
 void node_specific_loop()
 {
+#if DEBUG_ENABLED
   /* Performance measurement */
   unsigned long current_time = millis();
-  
+#endif
+
   /* Sensor polling */
   poll_sensors();
 
@@ -745,7 +791,10 @@ void loop() {
   long now = millis();
   if( (now - last_iteration) > polling_period )
   {
+    /* Node specific loop */
     node_specific_loop();
+
+    /* Update last iteration time */
     last_iteration = now;
   }
 

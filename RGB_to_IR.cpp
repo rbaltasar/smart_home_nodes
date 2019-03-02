@@ -165,6 +165,7 @@ void RGB_to_IR::send_ir_command(uint32_t command, uint8_t repetitions)
   {
     m_irsend.sendNEC(command, 32);
     delay(SEND_PERIOD);
+    yield();
   }
   digitalWrite(LED_BUILTIN, HIGH);
 }

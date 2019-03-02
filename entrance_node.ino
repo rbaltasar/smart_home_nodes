@@ -14,8 +14,6 @@
 
   Logic:
     Distinguish between entrance and exit
-    Make sound if exit detected and warning message received
-
 
 */
 
@@ -29,19 +27,18 @@ const char* password = "";
 const char* mqtt_server = "192.168.2.118";
 
 /* Debugging */
-#define DEBUG_ENABLED 1
+#define DEBUG_ENABLED 0
 
 /* Hardware settings */
 #define DOOR_STATUS_PIN D2
-#define PRESSURE_SENSOR_PIN D1
-#define BUZZER_PIN D8
+#define PRESSURE_SENSOR_PIN D5
+//#define BUZZER_PIN D8
 #define PRESENCE_COUNTER_MAX 10
 #define ENTRANCE_DETECTION_THRESHOLD 20000 //milliseconds
 #define EVENT_MAX_TX_FREQ 10000 //milliseconds
+#define EVENT_MAX_PRESSURE_FREQ ENTRANCE_DETECTION_THRESHOLD
 #define ALARM_DURATION 1 //repetitions
 #define POLLING_PERIOD 500 //milliseconds
-
-#define MQTTpubQos 2
 
 /* Logical states */
 unsigned long time_since_pressure = 0;
@@ -52,6 +49,7 @@ bool pressure_detected_old = false;
 bool warning_status = false;
 unsigned long last_pressure_detected = 0;
 unsigned long last_event_published = 0;
+unsigned long last_event_pressure_published = 0;
 bool entrance_detected = false;
 bool exit_detected = false;
 
@@ -61,22 +59,31 @@ uint16_t disconnect_count = 0;
 WiFiClient espClient;
 PubSubClient client(espClient);
 volatile unsigned long last_iteration = 0;
-char msg[5];
-//StaticJsonBuffer<200> jsonBuffer;
-//JsonObject& JSONencoder = JSONbuffer.createObject();
 
 void setup() {
 
+#if 1
   Serial.begin(115200);
+#endif
+
+  attachInterrupt(digitalPinToInterrupt(DOOR_STATUS_PIN), door_detection_isr, RISING);
 
   setup_wifi();
   setup_hardware();
   setup_mqtt();
 
-  //attachInterrupt(digitalPinToInterrupt(PRESSURE_SENSOR_PIN), pressure_detection_isr, FALLING);
-  attachInterrupt(digitalPinToInterrupt(DOOR_STATUS_PIN), door_detection_isr, RISING);
+  /* Publish a boot event for error tracking and debugging */
+  bool publish_succeeded = false;
+  while(!publish_succeeded)
+  {
+    Serial.println("Hello");
+    publish_succeeded = client.publish("entrance_node/boot", "");
+    if(!publish_succeeded) network_loop();
+    yield();
+    Serial.println("Hello");
+  }
 
-  blink_led(500);
+  blink_led(50);
 }
 
 /* Subscribe to the MQTT topics */
@@ -84,10 +91,10 @@ void setup_mqtt()
 {
   /* Define MQTT broker */
   client.setServer(mqtt_server, 1883);
-  /* Define callback function */
-  client.setCallback(callback);
-  /* Subscribe to topics */
-  client.subscribe("entrance/warning");
+
+#if DEBUG_ENABLED
+  Serial.println("MQTT setup completed");
+#endif
 }
 
 /* Connect to the wireless network */
@@ -110,6 +117,10 @@ void setup_wifi() {
   Serial.println("WiFi connected");
   Serial.println("IP address: ");
   Serial.println(WiFi.localIP());
+
+#if DEBUG_ENABLED
+   Serial.println("Wifi setup completed");
+#endif
 }
 
 /* Configure the hardware */
@@ -117,50 +128,36 @@ void setup_hardware()
 {
  /* Setup pins */
  pinMode(DOOR_STATUS_PIN, INPUT_PULLUP);
- pinMode(BUZZER_PIN, OUTPUT);
- pinMode(PRESSURE_SENSOR_PIN, INPUT_PULLUP);
+ pinMode(PRESSURE_SENSOR_PIN, INPUT);//INPUT_PULLUP);
 
  pinMode(LED_BUILTIN, OUTPUT);
  digitalWrite(LED_BUILTIN, HIGH);
 
-}
+#if DEBUG_ENABLED
+  Serial.println("Hardware setup completed");
+#endif
 
-/* Configure the callback function for a subscribed topic */
-void callback(char* topic, byte* payload, unsigned int length) {
-
-  /* Print message (debugging only) */
-  Serial.print("Message arrived [");
-  Serial.print(topic);
-  Serial.print("] ");
-  for (int i = 0; i < length; i++) {
-    Serial.print((char)payload[i]);
-  }
-  Serial.println();
-
-  /* Filter for topics (optional when >1 topics) */
-
-  /* Read topic info */
-  if ((char)payload[0] == '1') warning_status = true;
-  else warning_status = false;
 }
 
 /* Reconnect to the MQTT broker */
 void reconnect() {
+
   // Loop until we're reconnected
-  while (!client.connected()) {
-    blink_led(100);
+  while (!client.connected())
+  {
     Serial.print("Attempting MQTT connection...");
     // Attempt to connect
-    if (client.connect("EntranceClient",NULL,NULL,0,2,0,0,1)) {
+    if (client.connect("EntranceClient"))
+    {
       Serial.println("connected");
-      client.subscribe("entrance/warning");
-    } else {
-      blink_led(100);
+    }
+    else
+    {
       Serial.print("failed, rc=");
       Serial.print(client.state());
       Serial.println(" try again in 5 seconds");
-      // Wait 500 milliseconds before retrying
-      delay(500);
+      // Wait 5 seconds before retrying
+      delay(5000);
     }
   }
 }
@@ -171,11 +168,8 @@ void network_loop()
   /* Enter critical area */
   noInterrupts();
 
-  if (!client.connected()) {
-    reconnect();
-    disconnect_count++;
-    client.publish("entrance_node/reconnection", String(disconnect_count).c_str());
-  }
+  /* MQTT loop */
+  if (!client.connected()) reconnect();
   client.loop();
 
   /* Exit critical area */
@@ -186,18 +180,24 @@ void blink_led(uint16_t delay_ms)
 {
   digitalWrite(LED_BUILTIN, LOW);
   delay(delay_ms);
+  network_loop();
   digitalWrite(LED_BUILTIN, HIGH);
   delay(delay_ms);
+  network_loop();
+  digitalWrite(LED_BUILTIN, LOW);
+  delay(delay_ms);
+  network_loop();
+  digitalWrite(LED_BUILTIN, HIGH);
+  delay(delay_ms);
+  network_loop();
   digitalWrite(LED_BUILTIN, LOW);
   delay(delay_ms);
   digitalWrite(LED_BUILTIN, HIGH);
   delay(delay_ms);
+  network_loop();
   digitalWrite(LED_BUILTIN, LOW);
   delay(delay_ms);
-  digitalWrite(LED_BUILTIN, HIGH);
-  delay(delay_ms);
-  digitalWrite(LED_BUILTIN, LOW);
-  delay(delay_ms);
+  network_loop();
   digitalWrite(LED_BUILTIN, HIGH);
 }
 
@@ -216,10 +216,10 @@ void get_door_status()
   }
   else door_status_open = false;
 
-  #if DEBUG_ENABLED
+ #if DEBUG_ENABLED
   Serial.print("Door detection: ");
   Serial.println(polled_value);
-  #endif
+ #endif
 
 }
 
@@ -236,10 +236,10 @@ void get_pressure_status()
 
   polled_value = digitalRead(PRESSURE_SENSOR_PIN);
   delay(50);
-  if(!polled_value) detection_count++;
+  if(polled_value) detection_count++;
   polled_value = digitalRead(PRESSURE_SENSOR_PIN);
   delay(100);
-  if(!polled_value) detection_count++;
+  if(polled_value) detection_count++;
 
   if(detection_count == 2)
   {
@@ -282,39 +282,6 @@ void poll_sensors()
   get_pressure_status();
 }
 
-/* Make sound with the BUZZER_PIN */
-void trigger_alarm()
-{
-  int duration = ALARM_DURATION;
-
-  while(duration > 0)
-  {
-    /* Trigger BUZZER_PIN */
-    digitalWrite(BUZZER_PIN,LOW);
-    delay(2000);
-    digitalWrite(BUZZER_PIN,HIGH);
-    delay(1000);
-    digitalWrite(BUZZER_PIN,LOW);
-    delay(200);
-    digitalWrite(BUZZER_PIN,HIGH);
-    delay(100);
-    digitalWrite(BUZZER_PIN,LOW);
-    delay(200);
-    digitalWrite(BUZZER_PIN,HIGH);
-    delay(100);
-    digitalWrite(BUZZER_PIN,LOW);
-    delay(200);
-    digitalWrite(BUZZER_PIN,HIGH);
-    delay(10);
-    digitalWrite(BUZZER_PIN,LOW);
-    delay(20);
-    digitalWrite(BUZZER_PIN,HIGH);
-    delay(10);
-    digitalWrite(BUZZER_PIN,LOW);
-    duration--;
-  }
-}
-
 /* Node-specific logic */
 /* If presence has been detected before door opens --> somebody left */
 /* If presence has been detected after door opens --> somebody came in */
@@ -345,12 +312,16 @@ void node_logic()
   }
 
   /* Trigger alarm in case of warning status */
-  if(warning_status && door_status_open) trigger_alarm();
+  //if(warning_status && door_status_open) trigger_alarm();
 }
 
 /* Publish sensor information */
 void publish_status()
 {
+
+  /* Measure current time only once */
+  unsigned long current_time = millis();
+
   /* Publish door open information with status update */
   if(door_status_open != door_status_open_old)
   {
@@ -362,50 +333,98 @@ void publish_status()
   }
 
   /* Publish door open information with status update */
-  if(pressure_detected != pressure_detected_old)
+  unsigned long time_since_pressure_event = current_time - last_event_pressure_published;
+  if((pressure_detected != pressure_detected_old) && (time_since_pressure_event > EVENT_MAX_PRESSURE_FREQ) )
   {
 #if DEBUG_ENABLED
     Serial.print("Change in pressure_detected: ");
     Serial.println(pressure_detected);
 #endif
     client.publish("entrance_node/pressure_detected", String(pressure_detected).c_str());
+    last_event_pressure_published = current_time;
   }
 
-
-
   /* Publish entrance & exit information when detected */
-  unsigned long time_since_event = millis() - last_event_published;
+  unsigned long time_since_event = current_time - last_event_published;
   if(entrance_detected && (time_since_event > EVENT_MAX_TX_FREQ))
   {
     #if DEBUG_ENABLED
     Serial.println("Publishing event: entrance detected");
     #endif
-    client.publish("entrance_node/entrance_detected", String(time_since_pressure).c_str());
-    last_event_published = millis();
+
+    /* Ensure that the critical topics get published */
+    bool publish_succeeded = false;
+    while(!publish_succeeded)
+    {
+      publish_succeeded = client.publish("entrance_node/entrance_detected", String(time_since_pressure).c_str());
+      if(!publish_succeeded) network_loop();
+      yield();
+    }
+    last_event_published = current_time;
     time_since_event = 0;
     digitalWrite(LED_BUILTIN, LOW);
   }
 
-
-  time_since_event = millis() - last_event_published;
   if(exit_detected && (time_since_event > EVENT_MAX_TX_FREQ))
   {
     #if DEBUG_ENABLED
     Serial.println("Publishing event: exit detected");
     #endif
-    client.publish("entrance_node/exit_detected", String(exit_detected).c_str());
+
+    /* Ensure that the critical topics get published */
+    bool publish_succeeded = false;
+    while(!publish_succeeded)
+    {
+      publish_succeeded = client.publish("entrance_node/exit_detected", String(exit_detected).c_str());
+      if(!publish_succeeded) network_loop();
+      yield();
+    }
     /* After an exit event, sleep 3 seconds to prevent false entrance events */
-    last_event_published = millis();
+    last_event_published = current_time;
     time_since_event = 0;
     digitalWrite(LED_BUILTIN, LOW);
   }
 
+  /* Show with the LED the period where no events are published */
   if(time_since_event > EVENT_MAX_TX_FREQ) digitalWrite(LED_BUILTIN, HIGH);
 
   /* Delete entrance & exit states after publish */
   entrance_detected = false;
   exit_detected = false;
+}
 
+/* Loop with node-specific stuff */
+/* This shall include polling the sensors, doing any node-specifi logic and
+ * publish the data.
+ * This loop is executed atomically
+ */
+void node_specific_loop()
+{
+#if DEBUG_ENABLED
+  /* Performance measurement */
+  unsigned long current_time = millis();
+#endif
+
+  /* Disable interrupts */
+  noInterrupts();
+
+  /* Sensor polling */
+  poll_sensors();
+
+  /* Internal logic */
+  node_logic();
+
+  /* Publish sensor information */
+  publish_status();
+
+  /* Leave critical area */
+  interrupts();
+
+#if DEBUG_ENABLED
+  current_time = millis() - current_time;
+  Serial.print("Duration node loop: ");
+  Serial.println(current_time);
+#endif
 }
 
 void loop() {
@@ -416,28 +435,10 @@ void loop() {
   long now = millis();
   if( (now - last_iteration) > POLLING_PERIOD )
   {
-    /* Enter critical area */
-    noInterrupts();
-    #if DEBUG_ENABLED
-    Serial.println("Heartbeat: LOOP");
-    #endif
+    /* Node specific loop */
+    node_specific_loop();
 
     /* Update last iteration time */
     last_iteration = now;
-
-    /* Sensor polling */
-    poll_sensors();
-
-    /* Internal logic */
-    node_logic();
-
-    /* Publish sensor information */
-    publish_status();
-
-    //blink_led();
-
-    /* Leave critical area */
-    interrupts();
   }
-
 }
